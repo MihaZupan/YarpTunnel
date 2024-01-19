@@ -99,6 +99,17 @@ internal sealed class HttpClientConnectionContext : ConnectionContext,
             connection.HttpResponseMessage.EnsureSuccessStatusCode();
 
             var responseStream = await connection.HttpResponseMessage.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+
+            ReadOnlySpan<byte> ExpectedMagicString() => "YarpTunnel"u8;
+
+            byte[] magicStringBuffer = new byte[ExpectedMagicString().Length];
+            await responseStream.ReadExactlyAsync(magicStringBuffer, cancellationToken);
+
+            if (!ExpectedMagicString().SequenceEqual(magicStringBuffer))
+            {
+                throw new InvalidOperationException("Invalid magic string received from tunnel frontend.");
+            }
+
             connection.Input = PipeReader.Create(responseStream);
 
             return connection;

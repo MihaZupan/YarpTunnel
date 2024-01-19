@@ -1,6 +1,7 @@
 ﻿using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Http.Timeouts;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.AspNetCore.Server.Kestrel.Core.Features;
@@ -30,12 +31,14 @@ public static class TunnelExensions
                 return Results.BadRequest();
             }
 
-            DisableMinRequestBodyDataRateAndMaxRequestBodySize(context);
+            DisableRequestLimits(context);
 
             if (!host.EndsWith(".tunnel", StringComparison.OrdinalIgnoreCase))
             {
                 host += ".tunnel";
             }
+
+            await context.Response.WriteAsync("YarpTunnel", context.RequestAborted);
 
             await using var stream = new DuplexHttpStream(context);
 
@@ -50,7 +53,7 @@ public static class TunnelExensions
         });
     }
 
-    private static void DisableMinRequestBodyDataRateAndMaxRequestBodySize(HttpContext httpContext)
+    private static void DisableRequestLimits(HttpContext httpContext)
     {
         var minRequestBodyDataRateFeature = httpContext.Features.Get<IHttpMinRequestBodyDataRateFeature>();
         if (minRequestBodyDataRateFeature is not null)
@@ -66,5 +69,7 @@ public static class TunnelExensions
                 maxRequestBodySizeFeature.MaxRequestBodySize = null;
             }
         }
+
+        httpContext.Features.Get<IHttpRequestTimeoutFeature>()?.DisableTimeout();
     }
 }
