@@ -9,7 +9,7 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/MihaZupan/YarpTunnel</PackageProjectUrl>
     <RepositoryUrl>https://github.com/MihaZupan/YarpTunnel.git</RepositoryUrl>
-    <PackageId>YarpTunnel</PackageId>
+    <PackageId>MZ.YarpTunnel</PackageId>
     <Version>0.1.0</Version>
     <PackageTags>Yarp;Tunnel;YarpTunnel;ReverseProxy</PackageTags>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
