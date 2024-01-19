@@ -10,7 +10,7 @@
     <PackageProjectUrl>https://github.com/MihaZupan/YarpTunnel</PackageProjectUrl>
     <RepositoryUrl>https://github.com/MihaZupan/YarpTunnel.git</RepositoryUrl>
     <PackageId>MZ.YarpTunnel</PackageId>
-    <Version>0.1.2</Version>
+    <Version>0.1.3</Version>
     <PackageTags>Yarp;Tunnel;YarpTunnel;ReverseProxy</PackageTags>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
   </PropertyGroup>

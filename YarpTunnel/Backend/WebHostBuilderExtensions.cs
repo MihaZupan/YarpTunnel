@@ -17,14 +17,16 @@ public static class WebHostBuilderTunnelExtensions
             throw new ArgumentException("Tunnel connection must use HTTPS.", nameof(url));
         }
 
+        var endPoint = new UriEndPoint(uri);
+
         hostBuilder.ConfigureKestrel(options =>
         {
-            options.Listen(new UriEndPoint(uri));
+            options.Listen(endPoint);
         });
 
         return hostBuilder.ConfigureServices(services =>
         {
-            var options = new TunnelOptions();
+            var options = new TunnelOptions(endPoint);
             configure?.Invoke(options);
 
             services.AddSingleton<IConnectionListenerFactory>(new TunnelConnectionListenerFactory(options));
