@@ -24,12 +24,10 @@ public static class WebHostBuilderTunnelExtensions
 
         return hostBuilder.ConfigureServices(services =>
         {
-            services.AddSingleton<IConnectionListenerFactory, TunnelConnectionListenerFactory>();
+            var options = new TunnelOptions();
+            configure?.Invoke(options);
 
-            if (configure is not null)
-            {
-                services.Configure(configure);
-            }
+            services.AddSingleton<IConnectionListenerFactory>(new TunnelConnectionListenerFactory(options));
         });
     }
 }

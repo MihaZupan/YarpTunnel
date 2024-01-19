@@ -1,6 +1,5 @@
 ﻿using System.Net;
 using Microsoft.AspNetCore.Connections;
-using Microsoft.Extensions.Options;
 
 namespace YarpTunnel.Backend;
 
@@ -8,9 +7,9 @@ internal sealed class TunnelConnectionListenerFactory : IConnectionListenerFacto
 {
     private readonly TunnelOptions _options;
 
-    public TunnelConnectionListenerFactory(IOptions<TunnelOptions> options)
+    public TunnelConnectionListenerFactory(TunnelOptions options)
     {
-        _options = options.Value;
+        _options = options;
     }
 
     public ValueTask<IConnectionListener> BindAsync(EndPoint endpoint, CancellationToken cancellationToken = default)
