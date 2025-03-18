@@ -6,30 +6,42 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.AspNetCore.Server.Kestrel.Core.Features;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using System.Net.Http.Headers;
 using Yarp.ReverseProxy.Forwarder;
 using YarpTunnel.Frontend;
 
 namespace Microsoft.Extensions.DependencyInjection;
 
-public static class TunnelExensions
+public static class TunnelExtensions
 {
-    public static IServiceCollection AddTunnelServices(this IServiceCollection services)
+    public static IServiceCollection AddTunnelServices(this IServiceCollection services, Action<TunnelFrontendOptions>? configure = null)
     {
-        var tunnelFactory = new TunnelClientFactory();
+        var options = new TunnelFrontendOptions();
+        configure?.Invoke(options);
+
+        var tunnelFactory = new TunnelClientFactory(options);
         services.AddSingleton(tunnelFactory);
         services.AddSingleton<IForwarderHttpClientFactory>(tunnelFactory);
+
         return services;
     }
 
-    public static IEndpointConventionBuilder MapHttp2Tunnel(this IEndpointRouteBuilder routes, string path)
+    public static IEndpointConventionBuilder MapTunnel(this IEndpointRouteBuilder routes, string path)
     {
-        return routes.MapPost(path, static async (HttpContext context, [FromQuery] string host, TunnelClientFactory tunnelFactory, IHostApplicationLifetime lifetime) =>
+        return routes.MapGet(path, static async (HttpContext context, [FromQuery] string host, TunnelClientFactory tunnelFactory, IHostApplicationLifetime lifetime, ILoggerFactory loggerFactory) =>
         {
-            // HTTP/2 duplex stream
-            if (context.Request.Protocol != HttpProtocol.Http2 || string.IsNullOrEmpty(host))
+            if (string.IsNullOrWhiteSpace(host) ||
+                !ProductHeaderValue.TryParse(context.Request.Headers.Upgrade, out var upgrade) ||
+                upgrade.Name != "YarpTunnel" ||
+                !Version.TryParse(upgrade.Version, out var version) ||
+                version < new Version(0, 1, 5) ||
+                context.Features.Get<IHttpUpgradeFeature>() is not { IsUpgradableRequest: true } upgradeFeature)
             {
                 return Results.BadRequest();
             }
+
+            await using Stream transport = await upgradeFeature.UpgradeAsync();
 
             DisableRequestLimits(context);
 
@@ -38,9 +50,9 @@ public static class TunnelExensions
                 host += ".tunnel";
             }
 
-            await context.Response.WriteAsync("YarpTunnel", context.RequestAborted);
+            await transport.WriteAsync("YarpTunnel"u8.ToArray(), context.RequestAborted);
 
-            await using var stream = new DuplexHttpStream(context);
+            var stream = new TunnelTransportStream(transport);
 
             tunnelFactory.AddConnection(host, stream);
 

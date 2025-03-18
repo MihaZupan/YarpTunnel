@@ -1,5 +1,7 @@
 using Microsoft.Net.Http.Headers;
 using System.Net;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -12,7 +14,7 @@ var app = builder.Build();
 
 app.UseAuthorization();
 
-app.MapHttp2Tunnel("/_yarp-tunnel")
+app.MapTunnel("/_yarp-tunnel")
     // Very basic auth for the tunnel endpoint.
     // Replace this with something reasonable :)
     .Add(builder =>
@@ -38,23 +40,11 @@ app.MapHttp2Tunnel("/_yarp-tunnel")
             {
                 string expected = "Secret";
 
-                return Equals(value, expected);
+                return expected.Length == value.Length &&
+                    CryptographicOperations.FixedTimeEquals(
+                        MemoryMarshal.AsBytes(expected.AsSpan()),
+                        MemoryMarshal.AsBytes(value.AsSpan()));
             }
-
-            static bool Equals(string a, string b)
-            {
-                if (a.Length != b.Length) return false;
-
-                int diff = 0;
-
-                for (int i = 0; i < a.Length; i++)
-                {
-                    diff |= a[i] ^ b[i];
-                }
-
-                return diff == 0;
-            }
-
         };
     });
 

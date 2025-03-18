@@ -1,6 +1,7 @@
 ﻿using System.Collections.Concurrent;
 using System.Net;
 using Microsoft.AspNetCore.Connections;
+using Microsoft.Extensions.Logging;
 
 namespace YarpTunnel.Backend;
 
@@ -9,7 +10,8 @@ namespace YarpTunnel.Backend;
 /// </summary>
 internal sealed class TunnelConnectionListener : IConnectionListener
 {
-    private readonly TunnelOptions _options;
+    private readonly TunnelBackendOptions _options;
+    private readonly ILoggerFactory _loggerFactory;
     private readonly SemaphoreSlim _connectionLock;
     private readonly ConcurrentDictionary<ConnectionContext, byte> _connections = new();
     private readonly CancellationTokenSource _closedCts = new();
@@ -18,19 +20,20 @@ internal sealed class TunnelConnectionListener : IConnectionListener
         EnableMultipleHttp2Connections = true,
         PooledConnectionLifetime = Timeout.InfiniteTimeSpan,
         PooledConnectionIdleTimeout = Timeout.InfiniteTimeSpan,
-        KeepAlivePingDelay = TimeSpan.FromSeconds(10),
-        KeepAlivePingTimeout = TimeSpan.FromSeconds(5),
+        KeepAlivePingDelay = TimeSpan.FromSeconds(15),
+        KeepAlivePingTimeout = TimeSpan.FromSeconds(10),
         KeepAlivePingPolicy = HttpKeepAlivePingPolicy.Always,
         AutomaticDecompression = DecompressionMethods.None,
         UseCookies = false,
-        ConnectTimeout = TimeSpan.FromSeconds(5),
+        ConnectTimeout = TimeSpan.FromSeconds(10),
     });
 
-    public TunnelConnectionListener(TunnelOptions options, EndPoint endpoint)
+    public TunnelConnectionListener(TunnelBackendOptions options, EndPoint endpoint, ILoggerFactory loggerFactory)
     {
         _options = options;
         _connectionLock = new(options.MaxConnectionCount);
         EndPoint = endpoint;
+        _loggerFactory = loggerFactory;
 
         if (endpoint is not UriEndPoint)
         {
@@ -58,30 +61,16 @@ internal sealed class TunnelConnectionListener : IConnectionListener
 
                 try
                 {
-                    var connection = await HttpClientConnectionContext.ConnectAsync(_httpMessageInvoker, ((UriEndPoint)EndPoint).Uri, _options, cancellationToken);
+                    var connection = await HttpClientConnectionContext.ConnectAsync(_httpMessageInvoker, ((UriEndPoint)EndPoint).Uri, _options, _loggerFactory.CreateLogger<HttpClientConnectionContext>(), cancellationToken);
 
                     // Track this connection lifetime
                     _connections.TryAdd(connection, 0);
 
-                    using (ExecutionContext.SuppressFlow())
+                    _ = connection.ExecutionTask.ContinueWith(t =>
                     {
-                        _ = Task.Run(async () =>
-                        {
-                            // When the connection is disposed, release it
-                            try
-                            {
-                                await connection.ExecutionTask;
-                            }
-                            catch { }
-                            finally
-                            {
-                                _connections.TryRemove(connection, out _);
-
-                                // Allow more connections in
-                                _connectionLock.Release();
-                            }
-                        }, CancellationToken.None);
-                    }
+                        _connections.TryRemove(connection, out _);
+                        _connectionLock.Release();
+                    }, CancellationToken.None);
 
                     return connection;
                 }

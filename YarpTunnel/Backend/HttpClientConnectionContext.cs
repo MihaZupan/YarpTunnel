@@ -1,9 +1,11 @@
-﻿using System.IO.Pipelines;
-using System.Net;
-using Microsoft.AspNetCore.Connections;
+﻿using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Connections.Features;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.Extensions.Logging;
 using Microsoft.Net.Http.Headers;
+using System.IO.Pipelines;
+using System.Net;
+using System.Net.Http.Headers;
 
 namespace YarpTunnel.Backend;
 
@@ -15,10 +17,19 @@ internal sealed class HttpClientConnectionContext : ConnectionContext,
     IConnectionTransportFeature,
     IDuplexPipe
 {
-    private readonly TaskCompletionSource _executionTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public const string ConnectionIdPrefix = "yarp-tunnel-";
 
-    private HttpClientConnectionContext()
+    private static long s_connectionCounter;
+
+    private readonly TaskCompletionSource _executionTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly ILogger<HttpClientConnectionContext> _logger;
+    private readonly TunnelBackendOptions _options;
+    private readonly long _connectionNumber = Interlocked.Increment(ref s_connectionCounter);
+
+    private HttpClientConnectionContext(ILogger<HttpClientConnectionContext> logger, TunnelBackendOptions options)
     {
+        _logger = logger;
+        _options = options;
         Transport = this;
 
         Features.Set<IConnectionIdFeature>(this);
@@ -26,11 +37,13 @@ internal sealed class HttpClientConnectionContext : ConnectionContext,
         Features.Set<IConnectionItemsFeature>(this);
         Features.Set<IConnectionEndPointFeature>(this);
         Features.Set<IConnectionLifetimeFeature>(this);
+
+        _logger.LogDebug("Connection {Number} created with {Id}.", _connectionNumber, ConnectionId);
     }
 
     public Task ExecutionTask => _executionTcs.Task;
 
-    public override string ConnectionId { get; set; } = $"yarp-tunnel-{Guid.NewGuid():n}";
+    public override string ConnectionId { get; set; } = $"{ConnectionIdPrefix}{Guid.NewGuid():n}";
 
     public override IFeatureCollection Features { get; } = new FeatureCollection();
 
@@ -51,9 +64,11 @@ internal sealed class HttpClientConnectionContext : ConnectionContext,
 
     public override void Abort()
     {
+        _logger.LogDebug("Connection {Id} aborted.", ConnectionId);
+
         HttpResponseMessage?.Dispose();
 
-        _executionTcs.TrySetCanceled();
+        _executionTcs.TrySetResult();
 
         Input?.CancelPendingRead();
         Output?.CancelPendingFlush();
@@ -61,6 +76,8 @@ internal sealed class HttpClientConnectionContext : ConnectionContext,
 
     public override void Abort(ConnectionAbortedException abortReason)
     {
+        _logger.LogDebug(abortReason, "Connection {Id} aborted.", ConnectionId);
+
         Abort();
     }
 
@@ -71,85 +88,159 @@ internal sealed class HttpClientConnectionContext : ConnectionContext,
         return base.DisposeAsync();
     }
 
-    public static async ValueTask<HttpClientConnectionContext> ConnectAsync(HttpMessageInvoker invoker, Uri uri, TunnelOptions options, CancellationToken cancellationToken)
+    public static async ValueTask<HttpClientConnectionContext> ConnectAsync(HttpMessageInvoker invoker, Uri uri, TunnelBackendOptions options, ILogger<HttpClientConnectionContext> logger, CancellationToken cancellationToken)
     {
-        // Timeout for connection attempt + response headers
-        using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        connectCts.CancelAfter(TimeSpan.FromSeconds(30));
-        cancellationToken = connectCts.Token;
-
-        var connection = new HttpClientConnectionContext();
+        var connection = new HttpClientConnectionContext(logger, options);
 
         try
         {
-            var request = new HttpRequestMessage(HttpMethod.Post, uri)
-            {
-                Version = new Version(2, 0),
-                VersionPolicy = HttpVersionPolicy.RequestVersionExact,
-                Content = new HttpClientConnectionContextContent(connection)
-            };
+            Stream transport;
 
-            if (!string.IsNullOrEmpty(options.AuthorizationHeaderValue))
+            // Timeout for connection attempt + response headers
+            using (var connectCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             {
-                request.Headers.Add(HeaderNames.Authorization, options.AuthorizationHeaderValue);
+                connectCts.CancelAfter(TimeSpan.FromSeconds(30));
+                transport = await connection.ConnectAsyncCore(invoker, uri, connectCts.Token);
             }
 
-            connection.HttpResponseMessage = await invoker.SendAsync(request, cancellationToken);
+            try
+            {
+                await connection.PingPongAsync(transport, cancellationToken);
 
-            connection.HttpResponseMessage.EnsureSuccessStatusCode();
+                connection.Input = PipeReader.Create(transport);
+                connection.Output = PipeWriter.Create(transport);
+            }
+            catch
+            {
+                await transport.DisposeAsync();
+                throw;
+            }
 
-            var responseStream = await connection.HttpResponseMessage.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            return connection;
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Error during connection to tunnel frontend.");
 
+            await connection.DisposeAsync();
+            throw;
+        }
+    }
+
+
+    private async Task<Stream> ConnectAsyncCore(HttpMessageInvoker invoker, Uri uri, CancellationToken cancellationToken)
+    {
+        // This request will serve as the transport for a reverse HTTP/2 connection.
+        // Using HTTP/1.1 for now as it should have lower overhead.
+        var request = new HttpRequestMessage(HttpMethod.Get, uri)
+        {
+            Version = HttpVersion.Version11
+        };
+
+        request.Headers.Upgrade.Add(new ProductHeaderValue("YarpTunnel", "0.1.5"));
+        request.Headers.Connection.Add("Upgrade");
+
+        if (!string.IsNullOrEmpty(_options.AuthorizationHeaderValue))
+        {
+            request.Headers.Add(HeaderNames.Authorization, _options.AuthorizationHeaderValue);
+        }
+
+        HttpResponseMessage = await invoker.SendAsync(request, cancellationToken);
+
+        if (HttpResponseMessage.StatusCode != HttpStatusCode.SwitchingProtocols)
+        {
+            throw new InvalidOperationException($"Unexpected status code {HttpResponseMessage.StatusCode} received from tunnel frontend.");
+        }
+
+        var transport = await HttpResponseMessage.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+
+        try
+        {
             ReadOnlySpan<byte> ExpectedMagicString() => "YarpTunnel"u8;
 
             byte[] magicStringBuffer = new byte[ExpectedMagicString().Length];
-            await responseStream.ReadExactlyAsync(magicStringBuffer, cancellationToken);
+            await transport.ReadExactlyAsync(magicStringBuffer, cancellationToken);
 
             if (!ExpectedMagicString().SequenceEqual(magicStringBuffer))
             {
                 throw new InvalidOperationException("Invalid magic string received from tunnel frontend.");
             }
 
-            connection.Input = PipeReader.Create(responseStream);
-
-            return connection;
+            return transport;
         }
         catch
         {
-            await connection.DisposeAsync();
+            await transport.DisposeAsync();
             throw;
         }
     }
 
-    private class HttpClientConnectionContextContent : HttpContent
+    private async Task PingPongAsync(Stream stream, CancellationToken cancellationToken)
     {
-        private readonly HttpClientConnectionContext _connectionContext;
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(15));
+        cancellationToken = timeoutCts.Token;
 
-        public HttpClientConnectionContextContent(HttpClientConnectionContext connectionContext)
+        using var writeTimerCts = new CancellationTokenSource();
+
+        byte[] sendBuffer = [1];
+        byte[] receiveBuffer = [0];
+        bool doneSending = false;
+
+        Task sendTask = Task.Run(async () =>
         {
-            _connectionContext = connectionContext;
+            try
+            {
+                using var timer = new PeriodicTimer(TimeSpan.FromSeconds(10));
+
+                while (await timer.WaitForNextTickAsync(writeTimerCts.Token) && !Volatile.Read(ref doneSending))
+                {
+                    await stream.WriteAsync(sendBuffer, cancellationToken);
+                    await stream.FlushAsync(cancellationToken);
+                }
+            }
+            catch { }
+        }, CancellationToken.None);
+
+        Exception? receiveException = null;
+
+        try
+        {
+            while (true)
+            {
+                int read = await stream.ReadAsync(receiveBuffer, cancellationToken);
+                if (read == 0)
+                {
+                    throw new InvalidOperationException("Connection closed by tunnel frontend.");
+                }
+
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(15));
+
+                if (receiveBuffer[0] == 42)
+                {
+                    _logger.LogDebug("Received ready signal from tunnel frontend on connection {Id}.", ConnectionId);
+                    break;
+                }
+
+                _logger.LogDebug("Received keepalive pong from tunnel frontend on connection {Id}.", ConnectionId);
+            }
+        }
+        catch (Exception ex)
+        {
+            receiveException = ex;
         }
 
-        protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context, CancellationToken cancellationToken)
+        Volatile.Write(ref doneSending, true);
+        writeTimerCts.Cancel();
+        await sendTask;
+
+        if (receiveException is not null)
         {
-            _connectionContext.Output = PipeWriter.Create(stream);
-
-            // Immediately flush request stream to send headers
-            // https://github.com/dotnet/corefx/issues/39586#issuecomment-516210081
-            await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-
-            using var _ = cancellationToken.UnsafeRegister(state => ((HttpClientConnectionContext)state!).Abort(), _connectionContext);
-
-            await _connectionContext.ExecutionTask.ConfigureAwait(false);
+            throw new InvalidOperationException("Error during ping-pong with tunnel frontend.", receiveException);
         }
 
-        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
-            throw new NotSupportedException();
-
-        protected override bool TryComputeLength(out long length)
-        {
-            length = -1;
-            return false;
-        }
+        sendBuffer[0] = 42;
+        await stream.WriteAsync(sendBuffer, cancellationToken);
+        await stream.FlushAsync(cancellationToken);
     }
 }

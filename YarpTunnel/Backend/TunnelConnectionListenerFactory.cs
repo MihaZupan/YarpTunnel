@@ -1,15 +1,18 @@
 ﻿using System.Net;
 using Microsoft.AspNetCore.Connections;
+using Microsoft.Extensions.Logging;
 
 namespace YarpTunnel.Backend;
 
 internal sealed class TunnelConnectionListenerFactory : IConnectionListenerFactory, IConnectionListenerFactorySelector
 {
-    private readonly TunnelOptions _options;
+    private readonly TunnelBackendOptions _options;
+    private readonly ILoggerFactory _loggerFactory;
 
-    public TunnelConnectionListenerFactory(TunnelOptions options)
+    public TunnelConnectionListenerFactory(TunnelBackendOptions options, ILoggerFactory loggerFactory)
     {
         _options = options;
+        _loggerFactory = loggerFactory;
     }
 
     public bool CanBind(EndPoint endpoint)
@@ -19,6 +22,6 @@ internal sealed class TunnelConnectionListenerFactory : IConnectionListenerFacto
 
     public ValueTask<IConnectionListener> BindAsync(EndPoint endpoint, CancellationToken cancellationToken = default)
     {
-        return new(new TunnelConnectionListener(_options, endpoint));
+        return new(new TunnelConnectionListener(_options, endpoint, _loggerFactory));
     }
 }
